@@ -1,0 +1,26 @@
+{
+  "name": "stacknow-metrics-server",
+  "version": "1.0.0",
+  "description": "",
+  "main": "bandwidth.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stacknow/stacknow-metrics-server.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/stacknow/stacknow-metrics-server/issues"
+  },
+  "homepage": "https://github.com/stacknow/stacknow-metrics-server#readme",
+  "dependencies": {
+    "@kubernetes/client-node": "^1.1.2",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "mysql2": "^3.14.0",
+    "node-cron": "^3.0.3"
+  }
+}
