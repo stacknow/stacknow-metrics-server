@@ -319,13 +319,13 @@ async function aggregateAndInsert() {
 // --------------------------------------------------------------
 // Cron Scheduling
 // --------------------------------------------------------------
-const collectionInterval = Math.max(5, parseInt(process.env.COLLECTION_INTERVAL_SECONDS, 10) || 15);
-const aggregationInterval = Math.max(collectionInterval, parseInt(process.env.AGGREGATION_INTERVAL_SECONDS, 10) || 60);
-console.log(`[INFO] Stats Collection Interval: ${collectionInterval} seconds`);
-console.log(`[INFO] Stats Aggregation/Insertion Interval: ${aggregationInterval} seconds`);
+// 10 minutes in cron means: at second 0, every 10th minute
+// Example: 00:00, 00:10, 00:20, 00:30, etc.
+const collectionCronExpr = "0 */10 * * * *";   // Runs at second 0, every 10 minutes
+const aggregationCronExpr = "5 */10 * * * *";  // Runs at second 5, every 10 minutes
 
-const collectionCronExpr = `*/${collectionInterval} * * * * *`;
-const aggregationCronExpr = `*/${aggregationInterval} * * * * *`;
+console.log("[INFO] Stats Collection Interval: 10 minutes");
+console.log("[INFO] Stats Aggregation Interval: 10 minutes");
 
 let isCollecting = false;
 let isAggregating = false;

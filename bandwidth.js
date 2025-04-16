@@ -24,7 +24,7 @@ const pool = mysql.createPool({
   port: process.env.MYSQL_PORT ? parseInt(process.env.MYSQL_PORT, 10) : 3306,
   user: process.env.MYSQL_USER || "stacknow_user",
   password: process.env.MYSQL_PASSWORD || "stacknow_password", // Set your password in .env
-  database: process.env.MYSQL_DATABASE || "kube_stats_db",        // Ensure this database exists
+  database: process.env.MYSQL_DATABASE || "kube_stats_db",      // Ensure this database exists
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
@@ -113,10 +113,9 @@ async function collectMetrics() {
 }
 
 // --------------------------------------------------------------
-// Cron Scheduling for Metrics Collection
+// Cron Scheduling for Metrics Collection (EVERY 10 MINUTES)
 // --------------------------------------------------------------
-// Schedule the job to run every minute (adjust cron expression as needed)
-cron.schedule('* * * * *', () => {
+cron.schedule('0 */10 * * * *', () => {
   collectMetrics();
 });
 
