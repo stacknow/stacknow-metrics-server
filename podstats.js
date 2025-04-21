@@ -210,6 +210,8 @@ async function collectStatsForAllPods() {
     for (const pod of pods) {
         const ns = pod.metadata?.namespace;
         const name = pod.metadata?.name;
+        const nodeName = pod.spec?.nodeName || null;
+        const phase = pod.status?.phase || null;
         if (!ns || !name) {
              console.warn("[WARN] Skipping pod spec with missing namespace or name:", pod.metadata?.uid);
              continue;
@@ -225,6 +227,8 @@ async function collectStatsForAllPods() {
         const stats = {
             namespace: ns,
             podName: name,
+            nodeName,
+            phase,
             cpuUsage: usage.cpuUsedCores,
             memoryUsageMB: usage.memUsedBytes / (1024 * 1024),
             memoryUsagePercentage: limitBytes > 0 ? Math.max(0, (usage.memUsedBytes / limitBytes) * 100) : 0,
@@ -241,7 +245,7 @@ async function collectStatsForAllPods() {
 function aggregateStats(statsList) {
     const count = statsList.length;
     if (!count) return null;
-    const { namespace, podName } = statsList[0];
+    const { namespace, podName, nodeName, phase } = statsList[0];
     let cpuSum = 0, memMBSum = 0, memPctSum = 0;
     statsList.forEach(s => {
         cpuSum += s.cpuUsage || 0;
@@ -249,7 +253,7 @@ function aggregateStats(statsList) {
         memPctSum += s.memoryUsagePercentage || 0;
     });
     return {
-        namespace, podName,
+        namespace, podName, nodeName, phase,
         cpuUsageAvg: cpuSum / count,
         memoryUsageMBAvg: memMBSum / count,
         memoryUsagePercentageAvg: memPctSum / count,
@@ -270,8 +274,8 @@ async function aggregateAndInsert() {
     let connection = null;
     const insertStmt = `
       INSERT INTO kube_pod_stats_aggregated
-      (pod_name, namespace, cpu_usage_avg, memory_usage_mb_avg, memory_usage_percentage_avg, data_points, aggregated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      (pod_name, namespace, node_name, phase, cpu_usage_avg, memory_usage_mb_avg, memory_usage_percentage_avg, data_points, aggregated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
     try {
         connection = await pool.getConnection();
@@ -285,7 +289,7 @@ async function aggregateAndInsert() {
                 try {
                     const mysqlTimestamp = agg.aggregatedAt.toISOString().slice(0, 19).replace("T", " ");
                     await connection.query(insertStmt, [
-                        agg.podName, agg.namespace, agg.cpuUsageAvg, agg.memoryUsageMBAvg,
+                        agg.podName, agg.namespace, agg.nodeName, agg.phase, agg.cpuUsageAvg, agg.memoryUsageMBAvg,
                         agg.memoryUsagePercentageAvg, agg.dataPoints, mysqlTimestamp
                     ]);
                     insertedCount++;
@@ -319,13 +323,14 @@ async function aggregateAndInsert() {
 // --------------------------------------------------------------
 // Cron Scheduling
 // --------------------------------------------------------------
-// 10 minutes in cron means: at second 0, every 10th minute
-// Example: 00:00, 00:10, 00:20, 00:30, etc.
-const collectionCronExpr = "0 */10 * * * *";   // Runs at second 0, every 10 minutes
-const aggregationCronExpr = "5 */10 * * * *";  // Runs at second 5, every 10 minutes
+// — at second 0, every 1 minute
+const collectionCronExpr   = "0 * * * * *";   
+// — at second 5, every 1 minute
+const aggregationCronExpr  = "5 * * * * *";  
 
-console.log("[INFO] Stats Collection Interval: 10 minutes");
-console.log("[INFO] Stats Aggregation Interval: 10 minutes");
+console.log("[INFO] Stats Collection Interval: 1 minute");
+console.log("[INFO] Stats Aggregation Interval: 1 minute");
+
 
 let isCollecting = false;
 let isAggregating = false;
