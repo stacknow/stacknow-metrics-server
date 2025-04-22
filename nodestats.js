@@ -375,8 +375,34 @@ async function collectAndStoreNodeDetails() {
 
         const instanceType = labels['node.kubernetes.io/instance-type'] || labels['beta.kubernetes.io/instance-type'] || null;
 
+               // --- Extract Node Pool Name (Check common labels) ---
+               const nodePoolName = labels['eks.amazonaws.com/nodegroup']       // AWS EKS Standard
+               || labels['cloud.google.com/gke-nodepool']   // Google GKE Standard
+               || labels['agentpool']                       // Azure AKS Standard
+               || labels['kubernetes.azure.com/agentpool']  // Azure AKS (alternative)
+               || labels['node.kubernetes.io/instancegroup'] // Sometimes used
+               || labels['pool']                            // Generic/Custom?
+               || null;                                     // Default to null if not found
+
+                // --- Extract Zone (Check common labels) ---
+                const nodeZone = labels['topology.kubernetes.io/zone']            // Standard topology label
+                        || labels['failure-domain.beta.kubernetes.io/zone'] // Older/Beta label
+                        || null;                                            // Default to null if not found
+
+                // --- Extract Region (Check common labels) ---
+                const nodeRegion = labels['topology.kubernetes.io/region']       // Standard topology label
+                        || labels['failure-domain.beta.kubernetes.io/region'] // Older/Beta label
+                        || null;                                            // Default to null if not found
+
+
         const record = {
             node_name: nodeName, collected_at: collectionTimestamp, instance_type: instanceType,
+                        // ++++ VVVV ADD THESE LINES VVVV ++++
+                        node_pool: nodePoolName,    // Add the extracted node pool name
+                        zone: nodeZone,          // Add the extracted zone
+                        region: nodeRegion,        // Add the extracted region
+                        // ++++ ^^^^ END OF ADDED LINES ^^^^ ++++
+
             architecture: nodeInfo.architecture || null, operating_system: nodeInfo.operatingSystem || null,
             os_image: nodeInfo.osImage || null, kernel_version: nodeInfo.kernelVersion || null,
             kubelet_version: nodeInfo.kubeletVersion || null,
@@ -409,7 +435,7 @@ async function collectAndStoreNodeDetails() {
     // Ensure column names EXACTLY match your MySQL table schema
     const insertStmt = `
         INSERT INTO kube_node_stats_detailed (
-            node_name, collected_at, instance_type, architecture, operating_system,
+            node_name, collected_at, instance_type, node_pool, zone, region, architecture, operating_system,
             os_image, kernel_version, kubelet_version, labels, taints, is_ready,
             conditions, capacity_cpu_cores, capacity_memory_bytes, capacity_pods,
             allocatable_cpu_cores, allocatable_memory_bytes, allocatable_pods,
@@ -420,7 +446,7 @@ async function collectAndStoreNodeDetails() {
         ) VALUES ?`;
 
     const values = recordsToInsert.map(r => [
-        r.node_name, r.collected_at, r.instance_type, r.architecture, r.operating_system,
+        r.node_name, r.collected_at, r.instance_type, r.node_pool, r.zone, r.region, r.architecture, r.operating_system,
         r.os_image, r.kernel_version, r.kubelet_version, r.labels, r.taints, r.is_ready,
         r.conditions, r.capacity_cpu_cores, r.capacity_memory_bytes, r.capacity_pods,
         r.allocatable_cpu_cores, r.allocatable_memory_bytes, r.allocatable_pods,
