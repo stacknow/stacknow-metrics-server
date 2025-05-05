@@ -2,8 +2,8 @@
  * File: kubeNodeStatsDetailed_v2.js
  * Description:
  *   - Collects detailed K8s node stats (usage, capacity, allocatable, requests, conditions, etc.).
- *   - Stores raw stats directly into MySQL for later analysis/aggregation.
- *   - Provides API endpoints to query the detailed stats.
+ *   - !! DELETES ALL PREVIOUS RECORDS and stores ONLY the latest snapshot into MySQL. !!
+ *   - Provides API endpoints to query the detailed stats (though history is lost).
  *   - Uses updated @kubernetes/client-node response handling and API call formats.
  * Prerequisites:
  *   - Project's package.json MUST include "type": "module"
@@ -13,6 +13,11 @@
  *   - If running locally: Valid ~/.kube/config pointing to your cluster.
  *   - If running in-cluster: Service account needs permissions for:
  *     nodes (get, list), pods (list all namespaces), nodes/metrics (custom resource get/list via metrics.k8s.io).
+ *
+ * WARNING: This version DELETES all data in the table before inserting the new snapshot.
+ *          This means ALL HISTORICAL DATA IS LOST on each collection cycle.
+ *          Use this only if you explicitly require only the latest state and understand this limitation.
+ *          The original append-only version is generally recommended for monitoring.
  */
 
 // --- Core Dependencies ---
@@ -225,7 +230,6 @@ async function collectAndStoreNodeDetails() {
         }
     } catch (err) {
         const statusCode = err.statusCode || err.response?.statusCode || 'N/A';
-        // Prioritize K8s API error body, then message
         const errorDetails = err.response?.body || err.message || err;
         const errorString = JSON.stringify(errorDetails).substring(0, 500) + (JSON.stringify(errorDetails).length > 500 ? '...' : '');
 
@@ -249,7 +253,7 @@ async function collectAndStoreNodeDetails() {
         // --- RESPONSE HANDLING: Access 'items' directly ---
         if (nodesRes && nodesRes.items && Array.isArray(nodesRes.items)) {
             nodes = nodesRes.items;
-            specsOk = true;
+            specsOk = true; // Mark as successful only if we get items
             console.log(`[INFO] K8s Core API: Fetched ${nodes.length} node specifications.`);
         } else {
             console.error("[ERROR] K8s Core API: listNode response invalid or empty. Expected '.items' array. Response:", JSON.stringify(nodesRes).substring(0, 500) + '...');
@@ -375,34 +379,29 @@ async function collectAndStoreNodeDetails() {
 
         const instanceType = labels['node.kubernetes.io/instance-type'] || labels['beta.kubernetes.io/instance-type'] || null;
 
-               // --- Extract Node Pool Name (Check common labels) ---
-               const nodePoolName = labels['eks.amazonaws.com/nodegroup']       // AWS EKS Standard
-               || labels['cloud.google.com/gke-nodepool']   // Google GKE Standard
-               || labels['agentpool']                       // Azure AKS Standard
-               || labels['kubernetes.azure.com/agentpool']  // Azure AKS (alternative)
-               || labels['node.kubernetes.io/instancegroup'] // Sometimes used
-               || labels['pool']                            // Generic/Custom?
-               || null;                                     // Default to null if not found
+        // --- Extract Node Pool Name (Check common labels) ---
+        const nodePoolName = labels['eks.amazonaws.com/nodegroup']       // AWS EKS Standard
+           || labels['cloud.google.com/gke-nodepool']   // Google GKE Standard
+           || labels['agentpool']                       // Azure AKS Standard
+           || labels['kubernetes.azure.com/agentpool']  // Azure AKS (alternative)
+           || labels['node.kubernetes.io/instancegroup'] // Sometimes used
+           || labels['pool']                            // Generic/Custom?
+           || null;                                     // Default to null if not found
 
-                // --- Extract Zone (Check common labels) ---
-                const nodeZone = labels['topology.kubernetes.io/zone']            // Standard topology label
-                        || labels['failure-domain.beta.kubernetes.io/zone'] // Older/Beta label
-                        || null;                                            // Default to null if not found
+        // --- Extract Zone (Check common labels) ---
+        const nodeZone = labels['topology.kubernetes.io/zone']            // Standard topology label
+                || labels['failure-domain.beta.kubernetes.io/zone'] // Older/Beta label
+                || null;                                            // Default to null if not found
 
-                // --- Extract Region (Check common labels) ---
-                const nodeRegion = labels['topology.kubernetes.io/region']       // Standard topology label
-                        || labels['failure-domain.beta.kubernetes.io/region'] // Older/Beta label
-                        || null;                                            // Default to null if not found
+        // --- Extract Region (Check common labels) ---
+        const nodeRegion = labels['topology.kubernetes.io/region']       // Standard topology label
+                || labels['failure-domain.beta.kubernetes.io/region'] // Older/Beta label
+                || null;                                            // Default to null if not found
 
 
         const record = {
             node_name: nodeName, collected_at: collectionTimestamp, instance_type: instanceType,
-                        // ++++ VVVV ADD THESE LINES VVVV ++++
-                        node_pool: nodePoolName,    // Add the extracted node pool name
-                        zone: nodeZone,          // Add the extracted zone
-                        region: nodeRegion,        // Add the extracted region
-                        // ++++ ^^^^ END OF ADDED LINES ^^^^ ++++
-
+            node_pool: nodePoolName, zone: nodeZone, region: nodeRegion,
             architecture: nodeInfo.architecture || null, operating_system: nodeInfo.operatingSystem || null,
             os_image: nodeInfo.osImage || null, kernel_version: nodeInfo.kernelVersion || null,
             kubelet_version: nodeInfo.kubeletVersion || null,
@@ -422,17 +421,25 @@ async function collectAndStoreNodeDetails() {
         recordsToInsert.push(record);
     }
 
-    // --- 6. Insert Records into Database ---
-    if (recordsToInsert.length === 0) {
-        if (specsOk && nodes.length === 0) { console.log("[INFO] No node records generated: K8s API reported 0 nodes."); }
-        else if (specsOk) { console.log("[INFO] No node records generated: Nodes were found but processing resulted in zero records (check warnings/errors above)."); }
-        else { console.log("[INFO] No node records generated as node specification fetch failed earlier."); }
-        return 0;
+    // --- 6. Insert Records into Database (DELETING ALL PREVIOUS RECORDS FIRST) ---
+    // !!! WARNING !!! This section now deletes all previous data before inserting.
+    // If you need historical data, revert this section to the original append-only logic.
+    if (!specsOk) {
+         // If we couldn't get node specs (the primary source), we MUST NOT clear the table.
+         console.warn("[WARN] Skipping database update because initial node specification fetch failed. Table state remains unchanged.");
+         return 0; // Don't interact with DB if core node list failed
+    }
+    // If specsOk is true, we proceed.
+    // If nodes.length was 0, recordsToInsert will be empty, and the table will just be cleared.
+    if (recordsToInsert.length === 0 && nodes.length > 0) {
+         console.log("[INFO] Node specs fetched, but processing resulted in zero records. Proceeding to clear existing data.");
+    } else if (recordsToInsert.length === 0 && nodes.length === 0) {
+         console.log("[INFO] Node specs fetched successfully, and 0 nodes found in API. Proceeding to clear existing data.");
     }
 
     const dbPool = getDB();
     let connection = null;
-    // Ensure column names EXACTLY match your MySQL table schema
+    // Ensure column names EXACTLY match your MySQL table schema (same as before)
     const insertStmt = `
         INSERT INTO kube_node_stats_detailed (
             node_name, collected_at, instance_type, node_pool, zone, region, architecture, operating_system,
@@ -445,7 +452,7 @@ async function collectAndStoreNodeDetails() {
             pressure_memory_requests_vs_allocatable
         ) VALUES ?`;
 
-    const values = recordsToInsert.map(r => [
+    const values = recordsToInsert.map(r => [ // This mapping remains the same
         r.node_name, r.collected_at, r.instance_type, r.node_pool, r.zone, r.region, r.architecture, r.operating_system,
         r.os_image, r.kernel_version, r.kubelet_version, r.labels, r.taints, r.is_ready,
         r.conditions, r.capacity_cpu_cores, r.capacity_memory_bytes, r.capacity_pods,
@@ -456,21 +463,59 @@ async function collectAndStoreNodeDetails() {
         r.pressure_memory_requests_vs_allocatable
     ]);
 
+    // ***** MODIFICATION STARTS HERE: Delete then Insert *****
     try {
         connection = await dbPool.getConnection();
         await connection.beginTransaction();
-        const [result] = await connection.query(insertStmt, [values]); // Bulk insert
+        console.log("[INFO] Database Transaction Started.");
+
+        // --- Step 1: Delete ALL existing records ---
+        console.log("[INFO] Deleting all existing records from kube_node_stats_detailed...");
+        const [deleteResult] = await connection.query('DELETE FROM kube_node_stats_detailed');
+        console.log(`[INFO] Deleted ${deleteResult.affectedRows} old records.`);
+        // Alternative (potentially faster, resets auto_increment, might need different privileges):
+        // await connection.query('TRUNCATE TABLE kube_node_stats_detailed');
+        // console.log('[INFO] Truncated kube_node_stats_detailed table.');
+
+        // --- Step 2: Insert the NEW records (if any) ---
+        let insertedRows = 0;
+        if (recordsToInsert.length > 0) {
+             console.log(`[INFO] Inserting ${recordsToInsert.length} new node detail records...`);
+            const [insertResult] = await connection.query(insertStmt, [values]); // Bulk insert
+            insertedRows = insertResult.affectedRows;
+            console.log(`[INFO] Successfully inserted ${insertedRows} new node detail records.`);
+        } else {
+            console.log("[INFO] No new records to insert (0 nodes reported by API or processing failed). Table remains empty after delete.");
+        }
+
+        // --- Step 3: Commit the transaction ---
         await connection.commit();
-        console.log(`[INFO] Successfully inserted ${result.affectedRows} node detail records.`);
-        return result.affectedRows;
+        console.log("[INFO] Database Transaction Committed.");
+        return insertedRows; // Return count of *inserted* rows
+
     } catch (err) {
-        console.error("[ERROR] Database insert failed:", err.message, err.sqlMessage ? `(SQLState: ${err.sqlState}, SQLMessage: ${err.sqlMessage})` : '');
-        if (connection) { try { await connection.rollback(); console.log("[INFO] Rolling back DB transaction."); } catch (rbErr) { console.error("[ERROR] DB rollback failed:", rbErr.message); }}
-        if (recordsToInsert.length > 0) console.error("[DEBUG] Sample record causing potential issue:", JSON.stringify(recordsToInsert[0]).substring(0, 500) + '...');
-        return 0;
+        console.error("[ERROR] Database transaction failed:", err.message, err.sqlMessage ? `(SQLState: ${err.sqlState}, SQLMessage: ${err.sqlMessage})` : '');
+        if (connection) {
+            try {
+                console.log("[INFO] Rolling back DB transaction due to error...");
+                await connection.rollback();
+                console.log("[INFO] DB transaction rolled back.");
+            } catch (rbErr) {
+                console.error("[ERROR] DB rollback failed:", rbErr.message);
+            }
+        }
+         // Log sample record only if insertion was attempted and failed
+        if (err.sqlMessage && recordsToInsert.length > 0) {
+            console.error("[DEBUG] Sample record potentially involved in failed insert:", JSON.stringify(recordsToInsert[0]).substring(0, 500) + '...');
+        }
+        return 0; // Indicate failure or no insertion
     } finally {
-        if (connection) { connection.release(); }
+        if (connection) {
+            connection.release();
+            console.log("[INFO] Database connection released.");
+        }
     }
+    // ***** MODIFICATION ENDS HERE *****
 }
 
 
@@ -492,6 +537,7 @@ if (!cron.validate(collectionCronExpr)) {
         const startTime = Date.now();
         console.log(`[INFO] Cron triggered: Running detailed node collection...`);
         try {
+            // This function now deletes previous records internally
             const insertedCount = await collectAndStoreNodeDetails();
             const duration = (Date.now() - startTime) / 1000;
             console.log(`[INFO] Cron finished: Collection ended (${insertedCount} records inserted, ${duration.toFixed(2)}s).`);
@@ -506,6 +552,67 @@ if (!cron.validate(collectionCronExpr)) {
     console.log(`[INFO] Collection cron job scheduled with expression: ${collectionCronExpr}`);
 }
 
+
+// --- API Endpoints ---
+// Basic health check
+app.get("/healthz", (req, res) => {
+    res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// Get the VERY LATEST stats for all nodes (since the table only contains the last snapshot)
+app.get("/api/v1/nodes/latest", async (req, res) => {
+    const dbPool = getDB();
+    try {
+        const [rows] = await dbPool.query(`
+            SELECT *
+            FROM kube_node_stats_detailed
+            ORDER BY node_name ASC
+        `); // Simple select is enough now
+
+        if (!rows || rows.length === 0) {
+             // It's possible the table is empty if collection just ran and found 0 nodes,
+             // or if the initial collection hasn't run yet, or failed after delete.
+             return res.status(404).json({ error: "No node data found in the current snapshot." });
+        }
+
+        res.json({
+            data: rows,
+            count: rows.length,
+            // collected_at_timestamp is less meaningful now, maybe use the timestamp of the first row?
+            snapshot_timestamp: rows.length > 0 ? rows[0].collected_at : null
+        });
+    } catch (err) {
+        console.error("[API ERROR] Failed to fetch latest node stats:", err);
+        res.status(500).json({ error: "Internal Server Error", details: err.message });
+    }
+});
+
+// Get the VERY LATEST stats for a specific node
+app.get("/api/v1/nodes/latest/:nodeName", async (req, res) => {
+    const { nodeName } = req.params;
+    if (!nodeName) {
+        return res.status(400).json({ error: "Missing nodeName parameter" });
+    }
+    const dbPool = getDB();
+    try {
+        const [rows] = await dbPool.query(
+            'SELECT * FROM kube_node_stats_detailed WHERE node_name = ?',
+            [nodeName]
+        ); // Direct lookup
+
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({ error: `No data found for node '${nodeName}' in the current snapshot.` });
+        }
+
+        res.json({
+            data: rows[0], // Should only be one row per node now
+            snapshot_timestamp: rows[0].collected_at
+        });
+    } catch (err) {
+        console.error(`[API ERROR] Failed to fetch latest stats for node ${nodeName}:`, err);
+        res.status(500).json({ error: "Internal Server Error", details: err.message });
+    }
+});
 
 // --- Graceful Shutdown ---
 async function gracefulShutdown(signal) {
@@ -531,6 +638,7 @@ const HOST = "0.0.0.0"; // Listen on all available interfaces
 
 app.listen(PORT, HOST, () => {
   console.log(`[INFO] K8s Detailed Node Stats Server running at http://${HOST}:${PORT}`);
+  console.warn("[WARNING] This server version DELETES historical node data on each collection cycle.");
 
   if (!k8sClientInitialized) {
     console.error("[FATAL ERROR] Server started, BUT Kubernetes client initialization failed earlier. Data collection WILL NOT WORK.");
